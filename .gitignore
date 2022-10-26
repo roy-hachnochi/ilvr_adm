@@ -1,0 +1,9 @@
+.idea/*
+*.zip
+*.pptx
+*.docx
+*.pdf
+
+# Temp - in the future might want to remove from gitignore
+data_aug_examples/*
+output/*

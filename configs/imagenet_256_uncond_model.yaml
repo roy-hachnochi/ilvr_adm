@@ -1,0 +1,34 @@
+model_and_diffusion:
+  model_path: /disk4/royha/ilvr/models/256x256_imagenet_uncond.pt
+  image_size: 256
+  num_channels: 256
+  num_res_blocks: 2
+  num_heads: 4
+  num_heads_upsample: -1
+  num_head_channels: 64
+  attention_resolutions: '32,16,8'
+  channel_mult: ''
+  dropout: 0.0
+  class_cond: false
+  use_checkpoint: false
+  use_scale_shift_norm: true
+  resblock_updown: true
+  use_fp16: true
+  use_new_attention_order: false
+  learn_sigma: true
+  diffusion_steps: 1000
+  noise_schedule: linear
+  timestep_respacing: '250'
+  use_kl: false
+  predict_xstart: false
+  rescale_timesteps: false
+  rescale_learned_sigmas: false
+  repaint_conf:
+    use_repaint: true
+    inpa_inj_time_shift: 1
+    schedule_jump_params:
+      t_T: 250
+      n_sample: 1
+      jump_length: 10
+      jump_n_sample: 10
+      collapse_increasing: false

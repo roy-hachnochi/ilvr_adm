@@ -13,7 +13,7 @@ def diffusion_defaults():
     Defaults for image and classifier training.
     """
     return dict(
-        learn_sigma=False,
+        learn_sigma=True,
         diffusion_steps=1000,
         noise_schedule="linear",
         timestep_respacing="",
@@ -21,6 +21,7 @@ def diffusion_defaults():
         predict_xstart=False,
         rescale_timesteps=False,
         rescale_learned_sigmas=False,
+        repaint_conf=None,
     )
 
 
@@ -45,19 +46,19 @@ def model_and_diffusion_defaults():
     Defaults for image training.
     """
     res = dict(
-        image_size=64,
+        image_size=256,
         num_channels=128,
-        num_res_blocks=2,
+        num_res_blocks=1,
         num_heads=4,
         num_heads_upsample=-1,
-        num_head_channels=-1,
-        attention_resolutions="16,8",
+        num_head_channels=64,
+        attention_resolutions="16",
         channel_mult="",
         dropout=0.0,
         class_cond=False,
         use_checkpoint=False,
         use_scale_shift_norm=True,
-        resblock_updown=False,
+        resblock_updown=True,
         use_fp16=False,
         use_new_attention_order=False,
     )
@@ -95,6 +96,8 @@ def create_model_and_diffusion(
     resblock_updown,
     use_fp16,
     use_new_attention_order,
+    repaint_conf=None,
+    **ignore_kwargs,
 ):
     model = create_model(
         image_size,
@@ -113,6 +116,7 @@ def create_model_and_diffusion(
         resblock_updown=resblock_updown,
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
+        diffusion_steps=diffusion_steps
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -123,6 +127,7 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        repaint_conf=repaint_conf
     )
     return model, diffusion
 
@@ -144,6 +149,7 @@ def create_model(
     resblock_updown=False,
     use_fp16=False,
     use_new_attention_order=False,
+    diffusion_steps=None
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -156,6 +162,8 @@ def create_model(
             channel_mult = (1, 2, 3, 4)
         else:
             raise ValueError(f"unsupported image size: {image_size}")
+    elif isinstance(channel_mult, tuple):
+        pass
     else:
         channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
 
@@ -181,6 +189,7 @@ def create_model(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown,
         use_new_attention_order=use_new_attention_order,
+        diffusion_steps=diffusion_steps
     )
 
 
@@ -201,6 +210,7 @@ def create_classifier_and_diffusion(
     predict_xstart,
     rescale_timesteps,
     rescale_learned_sigmas,
+    repaint_conf,
 ):
     classifier = create_classifier(
         image_size,
@@ -221,6 +231,7 @@ def create_classifier_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        repaint_conf=repaint_conf,
     )
     return classifier, diffusion
 
@@ -234,6 +245,7 @@ def create_classifier(
     classifier_use_scale_shift_norm,
     classifier_resblock_updown,
     classifier_pool,
+    image_size_inference=None
 ):
     if image_size == 512:
         channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
@@ -250,8 +262,10 @@ def create_classifier(
     for res in classifier_attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
+    image_size_inference = image_size_inference or image_size
+
     return EncoderUNetModel(
-        image_size=image_size,
+        image_size=image_size_inference,
         in_channels=3,
         model_channels=classifier_width,
         out_channels=1000,
@@ -300,6 +314,7 @@ def sr_create_model_and_diffusion(
     use_scale_shift_norm,
     resblock_updown,
     use_fp16,
+    repaint_conf,
 ):
     model = sr_create_model(
         large_size,
@@ -327,6 +342,7 @@ def sr_create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        repaint_conf=repaint_conf,
     )
     return model, diffusion
 
@@ -394,8 +410,10 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
+    repaint_conf=None
 ):
-    betas = gd.get_named_beta_schedule(noise_schedule, steps)
+    betas = gd.get_named_beta_schedule(noise_schedule, steps, use_scale=True)
+
     if use_kl:
         loss_type = gd.LossType.RESCALED_KL
     elif rescale_learned_sigmas:
@@ -404,34 +422,32 @@ def create_gaussian_diffusion(
         loss_type = gd.LossType.MSE
     if not timestep_respacing:
         timestep_respacing = [steps]
-    return SpacedDiffusion(
-        use_timesteps=space_timesteps(steps, timestep_respacing),
-        betas=betas,
-        model_mean_type=(
-            gd.ModelMeanType.EPSILON if not predict_xstart else gd.ModelMeanType.START_X
-        ),
-        model_var_type=(
-            (
-                gd.ModelVarType.FIXED_LARGE
-                if not sigma_small
-                else gd.ModelVarType.FIXED_SMALL
-            )
-            if not learn_sigma
-            else gd.ModelVarType.LEARNED_RANGE
-        ),
-        loss_type=loss_type,
-        rescale_timesteps=rescale_timesteps,
-    )
+    return SpacedDiffusion(use_timesteps=space_timesteps(steps, timestep_respacing), betas=betas, model_mean_type=(
+        gd.ModelMeanType.EPSILON if not predict_xstart else gd.ModelMeanType.START_X
+    ), model_var_type=(
+        (
+            gd.ModelVarType.FIXED_LARGE
+            if not sigma_small
+            else gd.ModelVarType.FIXED_SMALL
+        )
+        if not learn_sigma
+        else gd.ModelVarType.LEARNED_RANGE
+    ), loss_type=loss_type, rescale_timesteps=rescale_timesteps, repaint_conf=repaint_conf)
 
 
-def add_dict_to_argparser(parser, default_dict):
+def add_dict_to_argparser(parser, default_dict, types_dict=None):
     for k, v in default_dict.items():
-        v_type = type(v)
-        if v is None:
-            v_type = str
-        elif isinstance(v, bool):
-            v_type = str2bool
-        parser.add_argument(f"--{k}", default=v, type=v_type)
+        if types_dict is not None and k in types_dict:
+            v_type = types_dict[k]
+        else:
+            v_type = type(v)
+            if v is None:
+                v_type = str
+            elif isinstance(v, bool):
+                v_type = str2bool
+        nargs = '*' if isinstance(v, list) else '?'
+        default = None if isinstance(v, list) else v
+        parser.add_argument(f"--{k}", default=default, nargs=nargs, type=v_type)
 
 
 def args_to_dict(args, keys):

@@ -7,7 +7,6 @@ from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 
-
 def load_data(
     *,
     data_dir,
@@ -38,17 +37,34 @@ def load_data(
     """
     if not data_dir:
         raise ValueError("unspecified data directory")
-    all_files = _list_image_files_recursively(data_dir)
+
+    # assume data is split to folders containing matching images. i.e.:
+    # data_dir ->
+    #   imgs ->
+    #     001.png
+    #     002.png
+    #     003.png
+    #   masks ->
+    #     001.png
+    #     002.png
+    #     003.png
+    files_dict = {}
+    for entry in sorted(bf.listdir(data_dir)):
+        full_path = bf.join(data_dir, entry)
+        if bf.isdir(full_path):
+            files_dict[entry] = _list_image_files_recursively(full_path)
+
     classes = None
     if class_cond:
         # Assume classes are the first part of the filename,
         # before an underscore.
-        class_names = [bf.basename(path).split("_")[0] for path in all_files]
+        first_key = list(files_dict.keys())[0]
+        class_names = [bf.basename(path).split("_")[0] for path in files_dict[first_key]]
         sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
         classes = [sorted_classes[x] for x in class_names]
     dataset = ImageDataset(
         image_size,
-        all_files,
+        files_dict,
         classes=classes,
         shard=MPI.COMM_WORLD.Get_rank(),
         num_shards=MPI.COMM_WORLD.Get_size(),
@@ -92,36 +108,47 @@ class ImageDataset(Dataset):
     ):
         super().__init__()
         self.resolution = resolution
-        self.local_images = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
         self.random_crop = random_crop
         self.random_flip = random_flip
 
+        self.local_images_dict = {}
+        for entry in image_paths:
+            self.local_images_dict[entry] = image_paths[entry][shard:][::num_shards]
+
     def __len__(self):
-        return len(self.local_images)
+        first_key = list(self.local_images_dict.keys())[0]
+        return len(self.local_images_dict[first_key])
 
     def __getitem__(self, idx):
-        path = self.local_images[idx]
-        with bf.BlobFile(path, "rb") as f:
-            pil_image = Image.open(f)
-            pil_image.load()
-        pil_image = pil_image.convert("RGB")
-
-        if self.random_crop:
-            arr = random_crop_arr(pil_image, self.resolution)
-        else:
-            arr = center_crop_arr(pil_image, self.resolution)
-
-        if self.random_flip and random.random() < 0.5:
-            arr = arr[:, ::-1]
-
-        arr = arr.astype(np.float32) / 127.5 - 1
-
         out_dict = {}
-        if self.local_classes is not None:
-            out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-        return np.transpose(arr, [2, 0, 1]), out_dict
+        for entry in self.local_images_dict:
+            path = self.local_images_dict[entry][idx]
+            with bf.BlobFile(path, "rb") as f:
+                pil_image = Image.open(f)
+                pil_image.load()
+            pil_image = pil_image.convert("RGB")
 
+            if self.random_crop:
+                arr = random_crop_arr(pil_image, self.resolution)
+            else:
+                arr = center_crop_arr(pil_image, self.resolution)
+
+            if self.random_flip and random.random() < 0.5:
+                arr = arr[:, ::-1]
+
+            arr = arr.astype(np.float32) / 127.5 - 1
+            out_dict[entry] = np.transpose(arr, [2, 0, 1])
+
+            # TODO: find a better solution for this?
+            if "mask" in entry:
+                # keep single channel and convert from [-1, 1] to [0, 1]:
+                out_dict[entry] = 0.5 * (out_dict[entry][:1] + 1)
+
+            if self.local_classes is not None:
+                out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+
+        return out_dict
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`

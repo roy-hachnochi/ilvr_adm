@@ -52,7 +52,7 @@ class Resizer(nn.Module):
         self.field_of_view = nn.ParameterList(field_of_view_list)
         self.weights = nn.ParameterList(weights_list)
 
-    def forward(self, in_tensor):
+    def forward(self, in_tensor, *ignore_args, **ignore_kwargs):
         x = in_tensor
 
         # Use the affecting position values and the set of weights to calculate the result of resizing along this 1 dim
