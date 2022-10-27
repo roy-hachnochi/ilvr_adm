@@ -53,29 +53,32 @@ class BlurOutwards(nn.Module):
         return torch.reshape(result, image.shape)
 
 # ======================================================================================================================
+FFT_RESIZING = 2
+
 class FilteredIfft2(nn.Module):
-    def __init__(self, shape, downsample=False):
+    def __init__(self, shape, n_freq_bands, downsample=False):
         super(FilteredIfft2, self).__init__()
-        if downsample:
+        if downsample and (FFT_RESIZING > 1):
             shape_d = list(shape)
-            shape_d[2] = int(shape_d[2] * 2)
-            shape_d[3] = int(shape_d[3] * 2)
-            self.resizer = Resizer(tuple(shape_d), 1 / 2)
+            shape_d[2] = int(shape_d[2] * FFT_RESIZING)
+            shape_d[3] = int(shape_d[3] * FFT_RESIZING)
+            self.resizer = Resizer(tuple(shape_d), 1 / FFT_RESIZING)
         else:
             self.resizer = Identity()
+        self.n_freq_bands = n_freq_bands
         self.shape = shape
 
-    def forward(self, in_tensor, f_mask, n_freq_bands, *ignore_args, **ignore_kwargs):
+    def forward(self, in_tensor, f_mask, *ignore_args, **ignore_kwargs):
         h, w = in_tensor.shape[-2:]
         in_tensor = torch.fft.fftshift(in_tensor)
         out_tensor = torch.zeros(self.shape).to(in_tensor.device)
         y, x = torch.meshgrid(torch.linspace(-1, 1, h), torch.linspace(-1, 1, w))
         x, y = x.to(out_tensor.device), y.to(out_tensor.device)
-        for b in range(n_freq_bands):
+        for b in range(self.n_freq_bands):
             if b == 0:
-                clip_vals = (0, 0.4 * (0.5 ** (n_freq_bands - b - 1)))
+                clip_vals = (0, 0.4 * (0.5 ** (self.n_freq_bands - b - 1)))
             else:
-                clip_vals = (0.4 * (0.5 ** (n_freq_bands - b)), 0.4 * (0.5 ** (n_freq_bands - b - 1)))
+                clip_vals = (0.4 * (0.5 ** (self.n_freq_bands - b)), 0.4 * (0.5 ** (self.n_freq_bands - b - 1)))
             mask = ((y >= -clip_vals[1]) & (y <= clip_vals[1]) & (x >= -clip_vals[1]) & (x <= clip_vals[1])) & ~(
                     (y > -clip_vals[0]) & (y < clip_vals[0]) & (x > -clip_vals[0]) & (x < clip_vals[0]))
             reconstruction = self.resizer(torch.fft.ifft2(torch.fft.ifftshift(mask * in_tensor)))
@@ -86,8 +89,8 @@ class FilteredIfft2(nn.Module):
 class Fft2(nn.Module):
     def __init__(self, shape, upsample=False):
         super(Fft2, self).__init__()
-        if upsample:
-            self.resizer = Resizer(shape, 2)
+        if upsample and (FFT_RESIZING > 1):
+            self.resizer = Resizer(shape, FFT_RESIZING)
         else:
             self.resizer = Identity()
 

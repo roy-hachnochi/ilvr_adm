@@ -100,8 +100,8 @@ def main():
             th.manual_seed(sampling_conf.seed)
             np.random.seed(sampling_conf.seed)
 
-        assert ((sampling_conf.down_N is None) or math.log(sampling_conf.down_N, 2).is_integer())
-        assert ((sampling_conf.N_mask is None) or math.log(sampling_conf.N_mask, 2).is_integer())
+        assert ((sampling_conf.down_N_in is None) or math.log(sampling_conf.down_N_in, 2).is_integer())
+        assert ((sampling_conf.down_N_out is None) or math.log(sampling_conf.down_N_out, 2).is_integer())
 
         OmegaConf.save(config, os.path.join(out_dir, 'config.yaml'))
 
@@ -114,16 +114,15 @@ def main():
                 sampling_conf.batch_size, 3, model_and_diffusion_conf.image_size, model_and_diffusion_conf.image_size),
                                              clip_denoised=sampling_conf.clip_denoised,
                                              model_kwargs=model_kwargs,
-                                             down_N=sampling_conf.down_N,
+                                             down_N_out=sampling_conf.down_N_out,
                                              range_t=sampling_conf.range_t,
                                              blend_pix=sampling_conf.blend_pix,
                                              mask_alpha=sampling_conf.mask,
-                                             time_mask_alpha=sampling_conf.time_mask,
-                                             N_mask_val=sampling_conf.N_mask,
+                                             T_mask=sampling_conf.T_mask,
+                                             down_N_in=sampling_conf.down_N_in,
                                              fft_num=sampling_conf.fft,
-                                             blur_masks_sigma=sampling_conf.blur_masks_sigma,
-                                             blur_sigma_out=sampling_conf.blur_sigma_out,
                                              blur_sigma_in=sampling_conf.blur_sigma_in,
+                                             blur_sigma_out=sampling_conf.blur_sigma_out,
                                              save_latents=save_latents,
                                              save_refs=save_refs)
 
@@ -150,7 +149,7 @@ def create_argparser():
         clip_denoised=True,
         num_samples=10000,
         batch_size=4,
-        down_N=list(),
+        down_N_in=list(),
         range_t=list(),
         use_ddim=False,
         base_samples="",
@@ -160,23 +159,21 @@ def create_argparser():
         seed=list(),
         blend_pix=list(),
         mask=list(),
-        time_mask=list(),
-        N_mask=list(),
+        T_mask=list(),
+        down_N_out=list(),
         fft=list(),
-        blur_masks_sigma=list(),
         blur_sigma_in=list(),
         blur_sigma_out=list(),
     )
     sample_types = dict(
-        down_N=int,
-        range_t=int,
+        down_N_in=int,
+        range_t=float,
         seed=int,
         blend_pix=int,
         mask=float,
-        time_mask=float,
-        N_mask=int,
+        T_mask=float,
+        down_N_out=int,
         fft=int,
-        blur_masks_sigma=float,
         blur_sigma_in=float,
         blur_sigma_out=float,
     )

@@ -8,19 +8,14 @@ Docstrings have been added, as well as DDIM sampling and a new collection of bet
 import enum
 import math
 import os
-from collections import defaultdict
 
 import numpy as np
 import torch as th
 from torchvision import utils
-from torchvision import transforms
-from torch import nn
 
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
-from multi_resizer import MultiResizer
-from resizer import Resizer
-from utils import FilteredIfft2, Fft2, BlurOutwards, Identity
+from masking import get_blend_operator_and_mask, get_low_pass_operator, shift_mask, get_fft_operator_and_mask
 
 from .scheduler import get_schedule_jump
 
@@ -479,12 +474,12 @@ class GaussianDiffusion:
         device=None,
         progress=True,
         return_all=False,
-        down_N=None,
-        range_t=0,
+        down_N_out=None,
+        range_t=0.,
         blend_pix=None,
         mask_alpha=None,
-        time_mask_alpha=None,
-        N_mask_val=None,
+        T_mask=None,
+        down_N_in=None,
         fft_num=None,
         blur_masks_sigma=0.,
         blur_sigma_in=None,
@@ -520,27 +515,23 @@ class GaussianDiffusion:
                                                      model_kwargs=model_kwargs,
                                                      device=device,
                                                      progress=progress,
-                                                     down_N=down_N,
+                                                     down_N_out=down_N_out,
                                                      range_t=range_t,
                                                      blend_pix=blend_pix,
                                                      mask_alpha=mask_alpha,
-                                                     time_mask_alpha=time_mask_alpha,
-                                                     N_mask_val=N_mask_val,
+                                                     T_mask=T_mask,
+                                                     down_N_in=down_N_in,
                                                      fft_num=fft_num,
-                                                     blur_masks_sigma=blur_masks_sigma,
                                                      blur_sigma_in=blur_sigma_in,
                                                      blur_sigma_out=blur_sigma_out,
                                                      save_latents=save_latents,
-                                                     save_refs=save_refs,
-                                                     ):
+                                                     save_refs=save_refs):
             final = sample
 
         if return_all:
             return final
         else:
             return final["sample"]
-
-
 
     def p_sample_loop_progressive(
         self,
@@ -553,14 +544,13 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
-        down_N=None,
-        range_t=0,
+        down_N_out=None,
+        range_t=0.,
         blend_pix=None,
         mask_alpha=None,
-        time_mask_alpha=None,
-        N_mask_val=None,
+        T_mask=None,
+        down_N_in=None,
         fft_num=None,
-        blur_masks_sigma=0.,
         blur_sigma_in=None,
         blur_sigma_out=None,
         save_latents=None,
@@ -594,97 +584,29 @@ class GaussianDiffusion:
             time_pairs = tqdm(time_pairs)
 
         ############ MASKED ILVR ############
-        # TODO: need to organize this/move elsewhere?
-        if (blur_masks_sigma is not None) and (blur_masks_sigma > 0):
-            kernel_size = 2 * math.ceil(3.72 * blur_masks_sigma) + 1  # 0.1% max height of gaussian
-            blur = transforms.GaussianBlur(kernel_size, sigma=blur_masks_sigma)
-        else:
-            blur = Identity()
+        mask = model_kwargs.get('masks')
 
-        if (blend_pix is None) or ("blend_masks" not in model_kwargs):
-            blend_mask = 0  # use only filtered
-            blend = Identity()
-        else:
-            if blend_pix > 0:
-                blend = BlurOutwards(n_pixels=blend_pix)
-            else:
-                blend = Identity()
-            blend_mask = 1 - blend(1 - model_kwargs["blend_masks"])  # TODO: maybe need to save mask as 1 inside and 0 outside and then fix this
+        # blend operator for mask smoothing
+        blend_mask, blend = get_blend_operator_and_mask(mask, blend_pix)
 
-        if (mask_alpha is None) or ("masks" not in model_kwargs):
-            mask = th.ones((shape[0], 1, shape[2], shape[3])).to(device)
-        else:
-            mask = (1 - mask_alpha) * model_kwargs["masks"] + mask_alpha  # TODO: TEMP convert from [0, 1] to [alpha, 1]
-            mask = blur(mask)
+        # non-mask low-pass filter
+        down_outer, up_outer = get_low_pass_operator(down_N_out, blur_sigma_out, shape, device)
 
-        assert ((blur_sigma_out is None) or (
-                    down_N is None)), 'Must choose a single filtering method (down_N/blur_sigma_out)'
-        assert ((blur_sigma_in is None) or (
-                N_mask_val is None)), 'Must choose a single filtering method (N_mask_val/blur_sigma_in)'
+        # mask low-pass filter
+        down_inner, up_inner = get_low_pass_operator(down_N_in, blur_sigma_in, shape, device)
 
-        if down_N is not None:
-            shape_d = list(shape)
-            shape_d[2] = int(shape_d[2] / down_N)
-            shape_d[3] = int(shape_d[3] / down_N)
-            down_outer = Resizer(shape, 1 / down_N).to(device)
-            up_outer = Resizer(tuple(shape_d), down_N).to(device)
-        elif blur_sigma_out is not None and blur_sigma_out > 0:
-            kernel_size = 2 * math.ceil(3.72 * blur_sigma_out) + 1  # 0.1% max height of gaussian
-            down_outer = transforms.GaussianBlur(kernel_size, sigma=blur_sigma_out)
-            up_outer = Identity()
-        else:
-            down_outer = Identity()
-            up_outer = Identity()
+        # time mask (when to stop ILVR for each pixel)
+        T_stop_in = (1 - T_mask) * self.num_timesteps if T_mask is not None else None
+        time_stop_mask = shift_mask(mask, T_stop_in, (1 - range_t) * self.num_timesteps, device)
 
-        if N_mask_val is not None:  # TODO: change name?
-            shape_d = list(shape)
-            shape_d[2] = int(shape_d[2] / N_mask_val)
-            shape_d[3] = int(shape_d[3] / N_mask_val)
-            down_inner = Resizer(shape, 1 / N_mask_val).to(device)
-            up_inner = Resizer(tuple(shape_d), N_mask_val).to(device)
-        elif blur_sigma_in is not None and blur_sigma_in > 0:
-            kernel_size = 2 * math.ceil(3.72 * blur_sigma_in) + 1  # 0.1% max height of gaussian
-            down_inner = transforms.GaussianBlur(kernel_size, sigma=blur_sigma_in)  # TODO: kernel size?
-            up_inner = Identity()
-        else:
-            down_inner = down_outer
-            up_inner = up_outer
+        # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can deprecate this
+        # mask = shift_mask(mask, mask_alpha, 1, device)
 
-        # # TODO: maybe we can degregate this
-        # if (N_mask_val is None) or ("N_masks" not in model_kwargs):
-        #     shape_d = list(shape)
-        #     shape_d[2] = int(shape_d[2] / down_N)
-        #     shape_d[3] = int(shape_d[3] / down_N)
-        #     down = Resizer(shape, 1 / down_N).to(device)
-        #     up = Resizer(tuple(shape_d), down_N).to(device)
-        # else:
-        #     N_mask = (down_N - N_mask_val) * model_kwargs["N_masks"] + N_mask_val  # TODO: TEMP convert from [0, 1] to [N_mask_val, down_N]
-        #     N_mask = blur(N_mask)
-        #     N_mask = (2 ** th.round(th.log2(N_mask))).int()
-        #     down = Identity().to(device)
-        #     up = MultiResizer(N_mask, shape, device).to(device)
-
-        if (time_mask_alpha is None) or ("time_masks" not in model_kwargs):
-            time_mask = th.zeros((shape[0], 1, shape[2], shape[3])).to(device)
-        else:
-            time_mask = (1 - time_mask_alpha) * model_kwargs["time_masks"] + time_mask_alpha  # TODO: TEMP convert from [0, 1] to [alpha, 1]
-            time_mask = self.num_timesteps * (1 - time_mask)  # convert from [0, 1] to [T, 0]
-            time_mask = blur(time_mask)
-
-        if (fft_num is None) or ("freq_masks" not in model_kwargs):
-            n_freq_bands = 1
-            freq_mask = th.ones((shape[0], n_freq_bands, shape[2], shape[3])).to(device)
-        else:
-            down_inner = Fft2(shape, True).to(device)
-            up_inner = FilteredIfft2(shape, True).to(device)
-            n_freq_bands = 3
-            active_freq = format(fft_num, f'#0{n_freq_bands + 2}b')[2:]
-            # TODO: find better solution to create mask
-            freq_mask_tmp = th.floor(th.abs((model_kwargs["freq_masks"] - 1e-7)) * n_freq_bands)  # discretize from [0, 1]
-            freq_mask = th.zeros((shape[0], n_freq_bands, shape[2], shape[3])).to(device)
-            freq_mask[:, [0], :, :] = th.where(freq_mask_tmp <= 0.2, float(active_freq[-1]), 1.)
-            freq_mask[:, [1], :, :] = th.where(freq_mask_tmp <= 0.2, float(active_freq[-2]), 1.)
-            freq_mask[:, [2], :, :] = th.where(freq_mask_tmp <= 0.2, float(active_freq[-3]), 1.)
+        # TODO: maybe we can deprecate this
+        down_fft, up_fft, freq_mask = get_fft_operator_and_mask(mask, fft_num, shape, device)
+        if (down_fft is not None) and (up_fft is not None):
+            down_inner = down_fft
+            up_inner = up_fft
         #####################################
 
         model_keys = list(model_kwargs.keys())
@@ -703,12 +625,12 @@ class GaussianDiffusion:
                                         model_kwargs=model_kwargs,
                                         )
                     #### ILVR ####
-                    if t_cur > range_t:
-                        active_mask = 1 - blend(1 - (mask * (t_cur > time_mask)).float())  # TODO: maybe need to save mask as 1 inside and 0 outside and then fix this
+                    if t_cur > (1 - range_t) * self.num_timesteps:
+                        active_mask = 1 - blend(1 - (mask * (t_cur > time_stop_mask)).float())
                         ref_sample = self.q_sample(model_kwargs[ref_key], t_cur_t, th.randn(*shape, device=device))
                         diff = ref_sample - out["sample"]
-                        diff_inner = up_inner(down_inner(diff), freq_mask, n_freq_bands)
-                        diff_outer = up_outer(down_outer(diff), freq_mask, n_freq_bands)
+                        diff_inner = up_inner(down_inner(diff), freq_mask)
+                        diff_outer = up_outer(down_outer(diff), freq_mask)
                         blended = blend_mask * diff_outer + (1 - blend_mask) * diff_inner
                         # x = out["sample"] + active_mask * blended
                         #

@@ -46,12 +46,8 @@ def main():
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = next(data)
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
-        sample = diffusion.p_sample_loop(
-            model,
-            (args.batch_size, 3, args.large_size, args.large_size),
-            clip_denoised=args.clip_denoised,
-            model_kwargs=model_kwargs,
-        )
+        sample = diffusion.p_sample_loop(model, (args.batch_size, 3, args.large_size, args.large_size),
+                                         clip_denoised=args.clip_denoised, model_kwargs=model_kwargs)
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
