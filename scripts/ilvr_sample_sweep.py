@@ -42,6 +42,7 @@ def main():
     default_conf = OmegaConf.create({'sampling': args_to_dict(args, defaults['sampling'].keys()),
                                      'model_and_diffusion': args_to_dict(args, defaults['model_and_diffusion'].keys())})
     cli = OmegaConf.from_dotlist(unknown)
+    cli = {key.replace('--', ''): val for key, val in cli.items()}
     configs = [OmegaConf.load(cfg) for cfg in args.config]
     config = OmegaConf.merge(default_conf, *configs, cli)
     sampling_conf = config.sampling
@@ -117,7 +118,7 @@ def main():
                                              down_N_out=sampling_conf.down_N_out,
                                              range_t=sampling_conf.range_t,
                                              blend_pix=sampling_conf.blend_pix,
-                                             mask_alpha=sampling_conf.mask,
+                                             mask_alpha=sampling_conf.mask_alpha,
                                              T_mask=sampling_conf.T_mask,
                                              down_N_in=sampling_conf.down_N_in,
                                              fft_num=sampling_conf.fft,
@@ -158,7 +159,7 @@ def create_argparser():
         save_refs=-1,
         seed=list(),
         blend_pix=list(),
-        mask=list(),
+        mask_alpha=list(),
         T_mask=list(),
         down_N_out=list(),
         fft=list(),
@@ -170,7 +171,7 @@ def create_argparser():
         range_t=float,
         seed=int,
         blend_pix=int,
-        mask=float,
+        mask_alpha=float,
         T_mask=float,
         down_N_out=int,
         fft=int,

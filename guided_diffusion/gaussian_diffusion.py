@@ -600,7 +600,8 @@ class GaussianDiffusion:
         time_stop_mask = shift_mask(mask, T_stop_in, (1 - range_t) * self.num_timesteps, device)
 
         # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can deprecate this
-        # mask = shift_mask(mask, mask_alpha, 1, device)
+        # alpha_mask = shift_mask(mask, mask_alpha, 1, device)
+        alpha_mask = 1
 
         # TODO: maybe we can deprecate this
         down_fft, up_fft, freq_mask = get_fft_operator_and_mask(mask, fft_num, shape, device)
@@ -626,7 +627,7 @@ class GaussianDiffusion:
                                         )
                     #### ILVR ####
                     if t_cur > (1 - range_t) * self.num_timesteps:
-                        active_mask = 1 - blend(1 - (mask * (t_cur > time_stop_mask)).float())
+                        active_mask = 1 - blend(1 - (alpha_mask * (t_cur > time_stop_mask)).float())
                         ref_sample = self.q_sample(model_kwargs[ref_key], t_cur_t, th.randn(*shape, device=device))
                         diff = ref_sample - out["sample"]
                         diff_inner = up_inner(down_inner(diff), freq_mask)

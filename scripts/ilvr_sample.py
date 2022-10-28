@@ -46,7 +46,7 @@ def main():
     model_and_diffusion_conf = config.model_and_diffusion
 
     # TODO: move this to parser?
-    sampling_conf.mask = float(sampling_conf.mask) if sampling_conf.mask else None
+    sampling_conf.mask_alpha = float(sampling_conf.mask_alpha) if sampling_conf.mask else None
     sampling_conf.T_mask = float(sampling_conf.T_mask) if sampling_conf.T_mask else None
     sampling_conf.down_N_in = int(sampling_conf.down_N_in) if sampling_conf.down_N_in else None
     sampling_conf.down_N_out = int(sampling_conf.down_N_out) if sampling_conf.down_N_out else None
@@ -108,7 +108,7 @@ def main():
                                          down_N_out=sampling_conf.down_N_out,
                                          range_t=sampling_conf.range_t,
                                          blend_pix=sampling_conf.blend_pix,
-                                         mask_alpha=sampling_conf.mask,
+                                         mask_alpha=sampling_conf.mask_alpha,
                                          T_mask=sampling_conf.T_mask,
                                          down_N_in=sampling_conf.down_N_in,
                                          fft_num=sampling_conf.fft,
@@ -149,7 +149,7 @@ def create_argparser():
         save_refs=-1,
         seed=-1,
         blend_pix="",
-        mask="",
+        mask_alpha="",
         T_mask="",
         down_N_out="",
         fft="",
