@@ -15,7 +15,7 @@ from torchvision import utils
 
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
-from masking import get_blend_operator_and_mask, get_low_pass_operator, shift_mask, get_fft_operator_and_mask
+from masked_ilvr.masking import get_blend_operator_and_mask, get_low_pass_operator, shift_mask
 
 from .scheduler import get_schedule_jump
 
@@ -131,15 +131,12 @@ class GaussianDiffusion:
         model_mean_type,
         model_var_type,
         loss_type,
-        rescale_timesteps=False,
-        repaint_conf=None
+        rescale_timesteps=False
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
         self.rescale_timesteps = rescale_timesteps
-
-        self.repaint_conf = repaint_conf
 
         # Use float64 for accuracy.
         betas = np.array(betas, dtype=np.float64)
@@ -473,19 +470,19 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=True,
+        ref_image=None,
+        mask=None,
         return_all=False,
         down_N_out=None,
-        range_t=0.,
-        blend_pix=None,
-        mask_alpha=None,
-        T_mask=None,
         down_N_in=None,
-        fft_num=None,
-        blur_masks_sigma=0.,
-        blur_sigma_in=None,
-        blur_sigma_out=None,
+        T_out=0.,
+        T_in=None,
+        blend_pix=None,
+        t_start=None,
+        repaint=None,
         save_latents=None,
         save_refs=None,
+        **ignore_kwargs,
     ):
         """
         Generate samples from the model.
@@ -515,15 +512,15 @@ class GaussianDiffusion:
                                                      model_kwargs=model_kwargs,
                                                      device=device,
                                                      progress=progress,
+                                                     ref_image=ref_image,
+                                                     mask=mask,
                                                      down_N_out=down_N_out,
-                                                     range_t=range_t,
-                                                     blend_pix=blend_pix,
-                                                     mask_alpha=mask_alpha,
-                                                     T_mask=T_mask,
                                                      down_N_in=down_N_in,
-                                                     fft_num=fft_num,
-                                                     blur_sigma_in=blur_sigma_in,
-                                                     blur_sigma_out=blur_sigma_out,
+                                                     T_out=T_out,
+                                                     T_in=T_in,
+                                                     blend_pix=blend_pix,
+                                                     t_start=t_start,
+                                                     repaint=repaint,
                                                      save_latents=save_latents,
                                                      save_refs=save_refs):
             final = sample
@@ -544,15 +541,15 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
+        ref_image=None,
+        mask=None,
         down_N_out=None,
-        range_t=0.,
-        blend_pix=None,
-        mask_alpha=None,
-        T_mask=None,
         down_N_in=None,
-        fft_num=None,
-        blur_sigma_in=None,
-        blur_sigma_out=None,
+        T_out=0.,
+        T_in=None,
+        blend_pix=None,
+        t_start=None,
+        repaint=None,
         save_latents=None,
         save_refs=None,
     ):
@@ -572,93 +569,76 @@ class GaussianDiffusion:
         else:
             img = th.randn(*shape, device=device)
 
-        if self.repaint_conf and self.repaint_conf.get('use_repaint', False) and self.repaint_conf.get(
-                'schedule_jump_params'):
-            times = get_schedule_jump(**self.repaint_conf.get('schedule_jump_params'))
+        if t_start is None:
+            t_start = self.num_timesteps
+
+        if repaint and repaint.get('use_repaint', False) and repaint.get('schedule_jump_params'):
+            schedule_jump_params = repaint.get('schedule_jump_params')
+            schedule_jump_params['t_T'] = t_start
+            indices = get_schedule_jump(**schedule_jump_params)
         else:
-            times = list(range(self.num_timesteps))[::-1]
-        time_pairs = list(zip(times[:-1], times[1:]))
+            indices = list(range(-1, t_start))[::-1]
+        time_ind_pairs = list(zip(indices[:-1], indices[1:]))
+        total_steps = len(time_ind_pairs)
 
         if progress:
             from tqdm.auto import tqdm
-            time_pairs = tqdm(time_pairs)
+            time_ind_pairs = tqdm(time_ind_pairs)
 
         ############ MASKED ILVR ############
-        mask = model_kwargs.get('masks')
-
         # blend operator for mask smoothing
         blend_mask, blend = get_blend_operator_and_mask(mask, blend_pix)
 
         # non-mask low-pass filter
-        down_outer, up_outer = get_low_pass_operator(down_N_out, blur_sigma_out, shape, device)
+        down_outer, up_outer = get_low_pass_operator(down_N_out)
 
         # mask low-pass filter
-        down_inner, up_inner = get_low_pass_operator(down_N_in, blur_sigma_in, shape, device)
+        down_inner, up_inner = get_low_pass_operator(down_N_in)
 
-        # time mask (when to stop ILVR for each pixel)
-        T_stop_in = (1 - T_mask) * self.num_timesteps if T_mask is not None else None
-        time_stop_mask = shift_mask(mask, T_stop_in, (1 - range_t) * self.num_timesteps, device)
+        # time mask (number of ilvr steps per pixel)
+        T_in = T_in * total_steps if T_in is not None else 0
+        T_out = T_out * total_steps if T_out is not None else 0
+        time_stop_mask = shift_mask(mask, T_in, T_out, total_steps, device)
 
-        # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can deprecate this
-        # alpha_mask = shift_mask(mask, mask_alpha, 1, device)
+        # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can depreciate this
+        # alpha_mask = shift_mask(mask, mask_alpha, 1, x_latent.device)
         alpha_mask = 1
-
-        # TODO: maybe we can deprecate this
-        down_fft, up_fft, freq_mask = get_fft_operator_and_mask(mask, fft_num, shape, device)
-        if (down_fft is not None) and (up_fft is not None):
-            down_inner = down_fft
-            up_inner = up_fft
         #####################################
 
-        model_keys = list(model_kwargs.keys())
-        model_keys = list(filter(lambda x: "mask" not in x, model_keys))
-        ref_key = model_keys[0]  # assume first key is ref image key
+        for ind, (i_cur, i_next) in enumerate(time_ind_pairs):
+            i_cur_t = th.tensor([i_cur] * shape[0], device=device)
 
-        for ind, (t_cur, t_next) in enumerate(time_pairs):
-            t_cur_t = th.tensor([t_cur] * shape[0], device=device)
-
-            if t_next < t_cur:  # clean
+            if i_next < i_cur:  # clean
                 with th.no_grad():
-                    out = self.p_sample(model, img, t_cur_t,
+                    out = self.p_sample(model, img, i_cur_t,
                                         clip_denoised=clip_denoised,
                                         denoised_fn=denoised_fn,
                                         cond_fn=cond_fn,
                                         model_kwargs=model_kwargs,
                                         )
-                    #### ILVR ####
-                    if t_cur > (1 - range_t) * self.num_timesteps:
-                        active_mask = 1 - blend(1 - (alpha_mask * (t_cur > time_stop_mask)).float())
-                        ref_sample = self.q_sample(model_kwargs[ref_key], t_cur_t, th.randn(*shape, device=device))
+                    # ILVR
+                    if (ind < T_out or ind < T_in) and ind != total_steps - 1:
+                        ref_sample = self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
+                        if ind >= T_in:
+                            # in this case there is no ILVR on masked region, so instead blend with diffusion output
+                            ref_sample = blend_mask * ref_sample + (1 - blend_mask) * out["sample"]
                         diff = ref_sample - out["sample"]
-                        diff_inner = up_inner(down_inner(diff), freq_mask)
-                        diff_outer = up_outer(down_outer(diff), freq_mask)
+                        active_mask = 1 - blend(1 - (alpha_mask * (ind < time_stop_mask)).float())  # TODO flip blending?
+                        # active_mask = blend(alpha_mask * (i < time_stop_mask).float())
+                        # active_mask = alpha_mask * (i < time_stop_mask)
+                        diff_inner = up_inner(down_inner(diff))
+                        diff_outer = up_outer(down_outer(diff))
                         blended = blend_mask * diff_outer + (1 - blend_mask) * diff_inner
-                        # x = out["sample"] + active_mask * blended
-                        #
-                        # # TODO: temp sanity check
-                        # diff = x - out["sample"]
-                        # diff_inner = up_inner(down_inner(diff), freq_mask, n_freq_bands)
-                        # diff_outer = up_outer(down_outer(diff), freq_mask, n_freq_bands)
-                        # blended = blend_mask * diff_outer + (1 - blend_mask) * diff_inner
                         out["sample"] = out["sample"] + active_mask * blended
-
-                        # TODO: old, delete
-                        # out["sample"] = out["sample"] + active_mask * mask * (up(down(
-                        #     self.q_sample(model_kwargs[ref_key], t, th.randn(*shape, device=device))), freq_mask, n_freq_bands) - up(
-                        #     down(out["sample"]), freq_mask, n_freq_bands))
 
                     img = out["sample"]
                     yield out
 
             else:  # re-noise
-                t_shift = self.repaint_conf.get('inpa_inj_time_shift', 1)
-                if self.repaint_conf.get('schedule_jump_params', {}).get('collapse_increasing', False):
-                    t_next_t = th.tensor([t_next] * shape[0], device=device)
-                    img = self.renoise(img, t_start=t_cur_t + t_shift - 1, t_end=t_next_t + t_shift - 1)
-                else:
-                    img = self.undo(img, t=t_cur_t + t_shift)
+                t_shift = repaint.get('inpa_inj_time_shift', 1)
+                img = self.undo(img, t=i_cur_t + t_shift)
 
-            if (save_latents is not None) and ((ind % save_latents['period'] == 0) or ind == len(time_pairs) - 1):
+            if (save_latents is not None) and ((ind % save_latents['period'] == 0) or ind == len(time_ind_pairs) - 1):
                 for j in range(out["sample"].shape[0]):
                     out_path = os.path.join(save_latents['dir'],
                                             f"{str(j).zfill(5)}_{str(ind).zfill(4)}.png")
@@ -670,7 +650,7 @@ class GaussianDiffusion:
                         value_range=(-1, 1),
                     )
 
-            # if (save_refs is not None) and ((ind % save_refs['period'] == 0) or ind == len(time_pairs) - 1):
+            # if (save_refs is not None) and ((ind % save_refs['period'] == 0) or ind == len(time_ind_pairs) - 1):
             #     for j in range(ref_sample.shape[0]):
             #         out_path = os.path.join(save_refs['dir'],
             #                                 f"{str(j).zfill(5)}_{str(ind).zfill(4)}.png")
@@ -782,6 +762,17 @@ class GaussianDiffusion:
         device=None,
         progress=False,
         eta=0.0,
+        ref_image=None,
+        mask=None,
+        down_N_out=None,
+        down_N_in=None,
+        T_out=0.,
+        T_in=None,
+        blend_pix=None,
+        t_start=None,
+        repaint=None,
+        save_latents=None,
+        save_refs=None,
     ):
         """
         Generate samples from the model using DDIM.
@@ -800,6 +791,17 @@ class GaussianDiffusion:
             device=device,
             progress=progress,
             eta=eta,
+            ref_image=ref_image,
+            mask=mask,
+            down_N_out=down_N_out,
+            down_N_in=down_N_in,
+            T_out=T_out,
+            T_in=T_in,
+            blend_pix=blend_pix,
+            t_start=t_start,
+            repaint=repaint,
+            save_latents=save_latents,
+            save_refs=save_refs,
         ):
             final = sample
         return final["sample"]
@@ -816,6 +818,17 @@ class GaussianDiffusion:
         device=None,
         progress=False,
         eta=0.0,
+        ref_image=None,
+        mask=None,
+        down_N_out=None,
+        down_N_in=None,
+        T_out=0.,
+        T_in=None,
+        blend_pix=None,
+        t_start=None,
+        repaint=None,
+        save_latents=None,
+        save_refs=None,
     ):
         """
         Use DDIM to sample from the model and yield intermediate samples from
@@ -830,29 +843,100 @@ class GaussianDiffusion:
             img = noise
         else:
             img = th.randn(*shape, device=device)
-        indices = list(range(self.num_timesteps))[::-1]
+
+        if t_start is None:
+            t_start = self.num_timesteps
+
+        if repaint and repaint.get('use_repaint', False) and repaint.get('schedule_jump_params'):
+            schedule_jump_params = repaint.get('schedule_jump_params')
+            schedule_jump_params['t_T'] = t_start
+            indices = get_schedule_jump(**schedule_jump_params)
+        else:
+            indices = list(range(-1, t_start))[::-1]
+        time_ind_pairs = list(zip(indices[:-1], indices[1:]))
+        total_steps = len(time_ind_pairs)
 
         if progress:
-            # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
+            time_ind_pairs = tqdm(time_ind_pairs)
 
-            indices = tqdm(indices)
+        ############ MASKED ILVR ############
+        # blend operator for mask smoothing
+        blend_mask, blend = get_blend_operator_and_mask(mask, blend_pix)
 
-        for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
-                out = self.ddim_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    cond_fn=cond_fn,
-                    model_kwargs=model_kwargs,
-                    eta=eta,
-                )
-                yield out
-                img = out["sample"]
+        # non-mask low-pass filter
+        down_outer, up_outer = get_low_pass_operator(down_N_out)
+
+        # mask low-pass filter
+        down_inner, up_inner = get_low_pass_operator(down_N_in)
+
+        # time mask (number of ilvr steps per pixel)
+        T_in = T_in * total_steps if T_in is not None else 0
+        T_out = T_out * total_steps if T_out is not None else 0
+        time_stop_mask = shift_mask(mask, T_in, T_out, total_steps, device)
+
+        # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can depreciate this
+        # alpha_mask = shift_mask(mask, mask_alpha, 1, x_latent.device)
+        alpha_mask = 1
+        #####################################
+
+        for ind, (i_cur, i_next) in enumerate(time_ind_pairs):
+            i_cur_t = th.tensor([i_cur] * shape[0], device=device)
+
+            if i_next < i_cur:  # clean
+                with th.no_grad():
+                    out = self.ddim_sample(model, img, i_cur_t,
+                                           clip_denoised=clip_denoised,
+                                           denoised_fn=denoised_fn,
+                                           cond_fn=cond_fn,
+                                           model_kwargs=model_kwargs,
+                                           eta=eta,
+                                           )
+                    # ILVR
+                    if (ind < T_out or ind < T_in) and ind != total_steps - 1:
+                        ref_sample = self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
+                        if ind >= T_in:
+                            # in this case there is no ILVR on masked region, so instead blend with diffusion output
+                            ref_sample = blend_mask * ref_sample + (1 - blend_mask) * out["sample"]
+                        diff = ref_sample - out["sample"]
+                        active_mask = 1 - blend(1 - (alpha_mask * (ind < time_stop_mask)).float())  # TODO flip blending?
+                        # active_mask = blend(alpha_mask * (i < time_stop_mask).float())
+                        # active_mask = alpha_mask * (i < time_stop_mask)
+                        diff_inner = up_inner(down_inner(diff))
+                        diff_outer = up_outer(down_outer(diff))
+                        blended = blend_mask * diff_outer + (1 - blend_mask) * diff_inner
+                        out["sample"] = out["sample"] + active_mask * blended
+
+                    img = out["sample"]
+                    yield out
+
+            else:  # re-noise
+                t_shift = repaint.get('inpa_inj_time_shift', 1)
+                img = self.undo(img, t=i_cur_t + t_shift)
+
+            if (save_latents is not None) and ((ind % save_latents['period'] == 0) or ind == len(time_ind_pairs) - 1):
+                for j in range(out["sample"].shape[0]):
+                    out_path = os.path.join(save_latents['dir'],
+                                            f"{str(j).zfill(5)}_{str(ind).zfill(4)}.png")
+                    utils.save_image(
+                        out["sample"][j].unsqueeze(0),
+                        out_path,
+                        nrow=1,
+                        normalize=True,
+                        value_range=(-1, 1),
+                    )
+
+            # if (save_refs is not None) and ((ind % save_refs['period'] == 0) or ind == len(time_ind_pairs) - 1):
+            #     for j in range(ref_sample.shape[0]):
+            #         out_path = os.path.join(save_refs['dir'],
+            #                                 f"{str(j).zfill(5)}_{str(ind).zfill(4)}.png")
+            #         utils.save_image(
+            #             (blend_mask * ref_outer + (1 - blend_mask) * ref_inner)[j].unsqueeze(0),
+            #             out_path,
+            #             nrow=1,
+            #             normalize=True,
+            #             value_range=(-1, 1),
+            #         )
 
     def _vb_terms_bpd(
         self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None

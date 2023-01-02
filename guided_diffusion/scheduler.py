@@ -190,13 +190,13 @@ def get_schedule_jump_paper():
 
     return ts
 
-
-def get_schedule_jump_test(to_supplement=False):
-    ts = get_schedule_jump(t_T=250, n_sample=1,
-                           jump_length=10, jump_n_sample=10,
+def get_schedule_jump_test(t_T=250, n_sample=1, jump_length=10, jump_n_sample=10, start_resampling=250,
+                           collapse_increasing=False, to_supplement=False):
+    ts = get_schedule_jump(t_T=t_T, n_sample=n_sample,
+                           jump_length=jump_length, jump_n_sample=jump_n_sample,
                            jump2_length=1, jump2_n_sample=1,
                            jump3_length=1, jump3_n_sample=1,
-                           start_resampling=250)
+                           start_resampling=start_resampling, collapse_increasing=collapse_increasing)
 
     import matplotlib.pyplot as plt
     SMALL_SIZE = 8*3

@@ -9,16 +9,19 @@ def image_grid(imgs, rows, cols):
         grid.paste(img, box=(i % cols * w, i // cols * h))
     return grid
 
-def check_experiment(exp_name, path, const_axes):
+def check_experiment(exp_name, path, const_axes=None, ignore=None):
     if not os.path.isdir(os.path.join(path, exp_name)):
         return False
-    return (const_axes is None) or (len(const_axes) == 0) or all([name + "_" in subdir for name in const_axes])
+    if not ((const_axes is None) or (len(const_axes) == 0) or all([name in subdir for name in const_axes])):
+        return False
+    return (ignore is None) or (len(ignore) == 0) or all([name not in subdir for name in ignore])
 
 # ======================================================================================================================
-im_dir = os.path.join("output", "imagenet_inpaint_maskt_blurin_blend")
-row_axis = 'blursigmain'
-col_axis = 'timemask'
-const_axes = ['blendpix_30']
+im_dir = "/disk2/royha/guided-diffusion/outputs/scribbles/TEST_ILVR_faces"
+col_axis = 'Tout'
+row_axis = 'Nout'
+const_axes = []
+ignore = []
 im_i = 0
 # ======================================================================================================================
 
@@ -28,14 +31,14 @@ out_filename = os.path.join(im_dir, out_filename)
 # load images
 im_list = {}
 for subdir in os.listdir(im_dir):
-    if check_experiment(subdir, im_dir, const_axes):
-        files = os.listdir(os.path.join(im_dir, subdir))
+    if check_experiment(subdir, im_dir, const_axes, ignore):
+        files = sorted(os.listdir(os.path.join(im_dir, subdir)))
         files = list(filter(lambda f: ".png" in f, files))
-        x = float(subdir.split(row_axis)[1].split('_')[1])
-        y = float(subdir.split(col_axis)[1].split('_')[1])
+        x = float(subdir.split(row_axis)[1].split('_')[1]) if row_axis else 0
+        y = float(subdir.split(col_axis)[1].split('_')[1]) if col_axis else 0
         if x not in im_list:
             im_list[x] = {}
-        filename = sorted(files)[im_i]
+        filename = files[im_i]
         im_list[x][y] = Image.open(os.path.join(im_dir, subdir, filename))
 
 # make grid

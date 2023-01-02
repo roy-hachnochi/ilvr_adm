@@ -20,8 +20,7 @@ def diffusion_defaults():
         use_kl=False,
         predict_xstart=False,
         rescale_timesteps=False,
-        rescale_learned_sigmas=False,
-        repaint_conf=None,
+        rescale_learned_sigmas=False
     )
 
 
@@ -96,7 +95,6 @@ def create_model_and_diffusion(
     resblock_updown,
     use_fp16,
     use_new_attention_order,
-    repaint_conf=None,
     **ignore_kwargs,
 ):
     model = create_model(
@@ -126,8 +124,7 @@ def create_model_and_diffusion(
         predict_xstart=predict_xstart,
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-        repaint_conf=repaint_conf
+        timestep_respacing=timestep_respacing
     )
     return model, diffusion
 
@@ -209,8 +206,7 @@ def create_classifier_and_diffusion(
     use_kl,
     predict_xstart,
     rescale_timesteps,
-    rescale_learned_sigmas,
-    repaint_conf,
+    rescale_learned_sigmas
 ):
     classifier = create_classifier(
         image_size,
@@ -230,8 +226,7 @@ def create_classifier_and_diffusion(
         predict_xstart=predict_xstart,
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-        repaint_conf=repaint_conf,
+        timestep_respacing=timestep_respacing
     )
     return classifier, diffusion
 
@@ -313,8 +308,7 @@ def sr_create_model_and_diffusion(
     use_checkpoint,
     use_scale_shift_norm,
     resblock_updown,
-    use_fp16,
-    repaint_conf,
+    use_fp16
 ):
     model = sr_create_model(
         large_size,
@@ -341,8 +335,7 @@ def sr_create_model_and_diffusion(
         predict_xstart=predict_xstart,
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-        repaint_conf=repaint_conf,
+        timestep_respacing=timestep_respacing
     )
     return model, diffusion
 
@@ -409,8 +402,7 @@ def create_gaussian_diffusion(
     predict_xstart=False,
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
-    timestep_respacing="",
-    repaint_conf=None
+    timestep_respacing=""
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps, use_scale=True)
 
@@ -432,7 +424,7 @@ def create_gaussian_diffusion(
         )
         if not learn_sigma
         else gd.ModelVarType.LEARNED_RANGE
-    ), loss_type=loss_type, rescale_timesteps=rescale_timesteps, repaint_conf=repaint_conf)
+    ), loss_type=loss_type, rescale_timesteps=rescale_timesteps)
 
 
 def add_dict_to_argparser(parser, default_dict, types_dict=None):
