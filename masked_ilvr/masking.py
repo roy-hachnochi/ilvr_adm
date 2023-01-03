@@ -20,6 +20,7 @@ def get_blend_operator_and_mask(mask, blend_pix):
     else:
         blend = BlurOutwards(n_pixels=blend_pix) if blend_pix > 0 else Identity()
         blend_mask = blend(mask)
+        # blend_mask = 1 - blend(1 - mask)
     return blend_mask, blend
 
 def get_low_pass_operator(down_N, blur_sigma=None):

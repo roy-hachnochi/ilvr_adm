@@ -596,8 +596,8 @@ class GaussianDiffusion:
         down_inner, up_inner = get_low_pass_operator(down_N_in)
 
         # time mask (number of ilvr steps per pixel)
-        T_in = T_in * total_steps if T_in is not None else 0
-        T_out = T_out * total_steps if T_out is not None else 0
+        T_in = T_in * total_steps - 1 if T_in is not None else 0
+        T_out = T_out * total_steps - 1 if T_out is not None else 0
         time_stop_mask = shift_mask(mask, T_in, T_out, total_steps, device)
 
         # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can depreciate this
@@ -619,9 +619,6 @@ class GaussianDiffusion:
                     # ILVR
                     if (ind < T_out or ind < T_in) and ind != total_steps - 1:
                         ref_sample = self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
-                        if ind >= T_in:
-                            # in this case there is no ILVR on masked region, so instead blend with diffusion output
-                            ref_sample = blend_mask * ref_sample + (1 - blend_mask) * out["sample"]
                         diff = ref_sample - out["sample"]
                         active_mask = 1 - blend(1 - (alpha_mask * (ind < time_stop_mask)).float())  # TODO flip blending?
                         # active_mask = blend(alpha_mask * (i < time_stop_mask).float())
@@ -871,8 +868,8 @@ class GaussianDiffusion:
         down_inner, up_inner = get_low_pass_operator(down_N_in)
 
         # time mask (number of ilvr steps per pixel)
-        T_in = T_in * total_steps if T_in is not None else 0
-        T_out = T_out * total_steps if T_out is not None else 0
+        T_in = T_in * total_steps - 1 if T_in is not None else 0
+        T_out = T_out * total_steps - 1 if T_out is not None else 0
         time_stop_mask = shift_mask(mask, T_in, T_out, total_steps, device)
 
         # alpha mask (magnitude of ILVR per pixel)  # TODO: maybe we can depreciate this
@@ -895,9 +892,6 @@ class GaussianDiffusion:
                     # ILVR
                     if (ind < T_out or ind < T_in) and ind != total_steps - 1:
                         ref_sample = self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
-                        if ind >= T_in:
-                            # in this case there is no ILVR on masked region, so instead blend with diffusion output
-                            ref_sample = blend_mask * ref_sample + (1 - blend_mask) * out["sample"]
                         diff = ref_sample - out["sample"]
                         active_mask = 1 - blend(1 - (alpha_mask * (ind < time_stop_mask)).float())  # TODO flip blending?
                         # active_mask = blend(alpha_mask * (i < time_stop_mask).float())

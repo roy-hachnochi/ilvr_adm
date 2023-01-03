@@ -15,6 +15,7 @@ import torch.distributed as dist
 
 from guided_diffusion import dist_util
 from guided_diffusion.script_util import create_model_and_diffusion
+from guided_diffusion.image_datasets import center_crop_arr
 
 def create_argparser():
     parser = argparse.ArgumentParser()
@@ -44,6 +45,13 @@ def create_argparser():
         "--skip_save",
         action='store_true',
         help="do not save indiviual samples. For speed measurements.",
+    )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        nargs="?",
+        default=None,
+        help="image resolution (will resize image)",
     )
 
     parser.add_argument(
@@ -102,13 +110,13 @@ def create_argparser():
     parser.add_argument(
         "--config",
         type=str,
-        default="/home/royha/ilvr_adm/configs/imagenet_512_uncond_model.yaml",
+        default="/home/royha/ilvr_adm/configs/ffhq_256_model.yaml",
         help="path to config which constructs model",
     )
     parser.add_argument(
         "--ckpt",
         type=str,
-        default="/disk2/royha/guided-diffusion/512x512_diffusion_uncond_finetune_008100.pt",
+        default="/disk2/royha/guided-diffusion/models/ffhq_10m.pt",
         help="path to checkpoint of model",
     )
     parser.add_argument(
@@ -182,26 +190,22 @@ def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
 
-def load_img(path):
+def load_img(path, image_size=None):
     image = Image.open(path).convert("RGB")
-    image = image.resize((512, 512), resample=PIL.Image.Resampling.LANCZOS)
+    if image_size is not None:
+        image = center_crop_arr(image, image_size)
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
     return 2. * image - 1.
 
-def load_mask(path, size, dilate, shadow=False):
-    mask = Image.open(path).convert("L")
-    mask = mask.resize(size, resample=PIL.Image.Resampling.NEAREST)
-    mask = np.array(mask).astype(np.float32) / 255.0
+def load_mask(path, image_size, dilate, shadow=False):
+    mask = load_img(path, image_size)
+    mask = 0.5 * (mask[:, :1, :, :] + 1)
     if shadow:
-        mask = add_shadow(mask)
-    mask = mask[None, None]
-    mask[mask < 0.05] = 0
-    mask[mask >= 0.05] = 1
+        mask = torch.from_numpy(add_shadow(mask.numpy()))
     if dilate > 0:
-        mask = binary_dilation(mask, iterations=dilate).astype(np.float32)
-    mask = torch.from_numpy(mask)
+        mask = torch.from_numpy(binary_dilation(mask.numpy(), iterations=dilate)).astype(np.float32)
     return mask
 
 def add_shadow(mask, width=30):
@@ -217,7 +221,7 @@ def add_shadow(mask, width=30):
         shadow_mask[u:d, l:r] = object_val
     return shadow_mask
 
-def load_data(img_path, mask_path, max_imgs, batch_size, mask_dilate, shadow=False):
+def load_data(img_path, mask_path, max_imgs, batch_size, mask_dilate, image_size=None, shadow=False):
     print(f"reading images from {img_path}")
     im_list = [os.path.join(img_path, filename) for filename in sorted(os.listdir(img_path))] if os.path.isdir(
         img_path) else [img_path]
@@ -234,9 +238,9 @@ def load_data(img_path, mask_path, max_imgs, batch_size, mask_dilate, shadow=Fal
     b = 0
     for i in range(1, min(n_imgs, max_imgs) + 1):
         filename.append(os.path.basename(im_list[i - 1]).split(".")[0])
-        img.append(load_img(im_list[i - 1]))
+        img.append(load_img(im_list[i - 1], image_size))
         if mask_path is not None:
-            mask.append(load_mask(mask_list[i - 1], tuple(img[-1].shape[-2:][::-1]), mask_dilate, shadow))
+            mask.append(load_mask(mask_list[i - 1], img[-1].shape[-1], mask_dilate, shadow))
         if i % batch_size == 0 or i == n_imgs:
             img = torch.concat(img, dim=0)
             mask = torch.concat(mask, dim=0) if mask_path is not None else None
@@ -293,7 +297,8 @@ def main():
             sampling_conf[param] = val
 
         data_loader = load_data(sampling_conf.init_img, sampling_conf.mask, sampling_conf.max_imgs,
-                                sampling_conf.batch_size, sampling_conf.mask_dilate, sampling_conf.shadow)
+                                sampling_conf.batch_size, sampling_conf.mask_dilate, sampling_conf.image_size,
+                                sampling_conf.shadow)
 
         sample_path = os.path.join(outpath, '_'.join([str(val).replace('_', '') for element in prod for val in element]))
         os.makedirs(sample_path, exist_ok=True)
@@ -328,7 +333,7 @@ def main():
                     if t_enc < sampling_conf.steps:
                         ref_sample = sampler.q_sample(img, torch.tensor([t_enc]*batch_size).to(device))
                     else:  # strength >= 1 ==> use only noise
-                        ref_sample = torch.randn_like(img)
+                        ref_sample = torch.randn(*img.shape, device=device)
                     # decode it
                     samples = sampling_fn(model,
                                           ref_sample.shape,
