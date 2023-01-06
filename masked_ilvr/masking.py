@@ -3,15 +3,43 @@ from torchvision import transforms
 import torch
 from torch import nn
 from torch.nn import functional as f
+from kornia.color import rgb_to_lab, lab_to_rgb
 
-import ResizeRight.resize_right as Resizer
+from ResizeRight.resize_right import resize
 
 BLUR_KERNEL_SIGMA = 3.72  # 0.1% max height of gaussian -> sqrt(-2*log(0.1%))  # TODO: is this good?
 
-def resizer(scale):
-    def resize(img):
-        return Resizer.resize(img, scale_factors=scale)
-    return resize
+class Resizer(nn.Module):
+    def __init__(self, down_N):
+        super(Resizer, self).__init__()
+        self.down_N = down_N
+
+    def forward(self, in_tensor, *ignore_args, **ignore_kwargs):
+        out_tensor = resize(in_tensor, scale_factors=1 / self.down_N)
+        out_tensor = resize(out_tensor, scale_factors=self.down_N)
+        return out_tensor
+
+class Harmonization(nn.Module):
+    def __init__(self, w):
+        super(Harmonization, self).__init__()
+        self.w = w
+
+    def forward(self, in_tensor, *ignore_args, **ignore_kwargs):
+        out_tensor = rgb_to_lab((in_tensor + 1.) / 2)  # rgb_to_lab expects [0, 1]
+        out_tensor[:, 0, :, :] *= (1 - self.w)
+        out_tensor = lab_to_rgb(out_tensor, clip=False) * 2 - 1  # back to [-1, 1]
+        return out_tensor
+
+class Colorization(nn.Module):
+    def __init__(self, w):
+        super(Colorization, self).__init__()
+        self.w = w
+
+    def forward(self, in_tensor, *ignore_args, **ignore_kwargs):
+        out_tensor = rgb_to_lab((in_tensor + 1.) / 2)  # rgb_to_lab expects [0, 1]
+        out_tensor[:, 1:, :, :] *= (1 - self.w)
+        out_tensor = lab_to_rgb(out_tensor, clip=False) * 2 - 1  # back to [-1, 1]
+        return out_tensor
 
 def get_blend_operator_and_mask(mask, blend_pix):
     if (blend_pix is None) or (mask is None):
@@ -26,16 +54,20 @@ def get_blend_operator_and_mask(mask, blend_pix):
 def get_low_pass_operator(down_N, blur_sigma=None):
     assert ((blur_sigma is None) or (down_N is None)), 'Must choose a single filtering method (down_N/blur_sigma)'
     if down_N is not None:
-        down = resizer(1 / down_N)
-        up = resizer(down_N)
+        return Resizer(down_N)
     elif blur_sigma is not None and blur_sigma > 0:  # TODO: can we depreciate this?
         kernel_size = 2 * math.ceil(BLUR_KERNEL_SIGMA * blur_sigma) + 1
-        down = transforms.GaussianBlur(kernel_size, sigma=blur_sigma)
-        up = Identity()
+        return transforms.GaussianBlur(kernel_size, sigma=blur_sigma)
     else:
-        down = Identity()
-        up = Identity()
-    return down, up
+        return Identity()
+
+def get_ilvr_operator(down_N, w, harmonization=False, colorization=False):
+    phi = torch.nn.Sequential(get_low_pass_operator(down_N))
+    if harmonization:
+        phi.append(Harmonization(w))
+    if colorization:
+        phi.append(Colorization(w))
+    return phi
 
 def shift_mask(mask, a, b, T, device):
     if mask is None:

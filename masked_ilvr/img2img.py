@@ -2,7 +2,6 @@
 
 import argparse, os, sys
 from itertools import product
-import PIL
 import torch
 import numpy as np
 from omegaconf import OmegaConf, ListConfig
@@ -16,6 +15,7 @@ import torch.distributed as dist
 from guided_diffusion import dist_util
 from guided_diffusion.script_util import create_model_and_diffusion
 from guided_diffusion.image_datasets import center_crop_arr
+from masked_ilvr.masking import get_ilvr_operator
 
 def create_argparser():
     parser = argparse.ArgumentParser()
@@ -47,6 +47,11 @@ def create_argparser():
         help="do not save indiviual samples. For speed measurements.",
     )
     parser.add_argument(
+        "--save_in",
+        action='store_true',
+        help="save input images to outdir",
+    )
+    parser.add_argument(
         "--image_size",
         type=int,
         nargs="?",
@@ -57,14 +62,14 @@ def create_argparser():
     parser.add_argument(
         "--steps",
         type=int,
-        nargs="*",
+        nargs="?",
         default=50,
         help="number of sampling steps",
     )
     parser.add_argument(
-        "--use_ddpm",
+        "--use_ddim",
         action='store_true',
-        help="use DDPM instead of DDIM for sampling.",
+        help="use DDIM instead of DDPM for sampling.",
     )
 
     parser.add_argument(
@@ -110,13 +115,13 @@ def create_argparser():
     parser.add_argument(
         "--config",
         type=str,
-        default="/home/royha/ilvr_adm/configs/ffhq_256_model.yaml",
+        default="/home/royha/ilvr_adm/configs/imagenet_512_uncond_model.yaml",
         help="path to config which constructs model",
     )
     parser.add_argument(
         "--ckpt",
         type=str,
-        default="/disk2/royha/guided-diffusion/models/ffhq_10m.pt",
+        default="/disk2/royha/guided-diffusion/models/512x512_diffusion_uncond_finetune_008100.pt",
         help="path to checkpoint of model",
     )
     parser.add_argument(
@@ -143,6 +148,20 @@ def create_argparser():
         type=int,
         nargs='*',
         help="ILVR downsampling factor outside mask"
+    )
+    parser.add_argument(
+        "--w_out",
+        type=float,
+        nargs='*',
+        default=0.0,
+        help="ILVR in LAB space weight, outside mask (in [0.0, 0.1])"
+    )
+    parser.add_argument(
+        "--w_in",
+        type=float,
+        nargs='*',
+        default=0.0,
+        help="ILVR in LAB space weight, inside mask (in [0.0, 0.1])"
     )
     parser.add_argument(
         "--T_out",
@@ -182,6 +201,16 @@ def create_argparser():
         "--shadow",
         action='store_true',
         help="adjust mask for shadow generation",
+    )
+    parser.add_argument(
+        "--harmonization",
+        action='store_true',
+        help="perform harmonization via LAB-space ILVR",
+    )
+    parser.add_argument(
+        "--colorization",
+        action='store_true',
+        help="perform colorization via LAB-space ILVR",
     )
 
     return parser
@@ -268,7 +297,7 @@ def main():
             else:
                 sampling_conf[k] = sampling_conf[k][0]
 
-    model_and_diffusion_conf.timestep_respacing = f'{sampling_conf.steps}' if sampling_conf.use_ddpm else f'ddim{sampling_conf.steps}'
+    model_and_diffusion_conf.timestep_respacing = f'ddim{sampling_conf.steps}' if sampling_conf.use_ddim else f'{sampling_conf.steps}'
 
     # load model and sampler
     dist_util.setup_dist()
@@ -279,7 +308,7 @@ def main():
     if model_and_diffusion_conf.use_fp16:
         model.convert_to_fp16()
     model.eval()
-    sampling_fn = sampler.p_sample_loop if sampling_conf.use_ddpm else sampler.ddim_sample_loop
+    sampling_fn = sampler.ilvr_sample
 
     nrow = sampling_conf.nrow if sampling_conf.nrow > 0 else sampling_conf.n_samples
 
@@ -317,6 +346,13 @@ def main():
         t_enc = int(sampling_conf.strength * sampling_conf.steps)
         print(f"target t_enc is {t_enc} steps")
 
+        # non-mask ILVR filter
+        phi_out = get_ilvr_operator(sampling_conf.down_N_out, sampling_conf.w_out, sampling_conf.harmonization,
+                                    sampling_conf.colorization)
+        # mask ILVR filter
+        phi_in = get_ilvr_operator(sampling_conf.down_N_in, sampling_conf.w_in, sampling_conf.harmonization,
+                                   sampling_conf.colorization)
+
         grid_count = 0
         with torch.no_grad():
             all_samples = list()
@@ -340,11 +376,12 @@ def main():
                                           noise=ref_sample,
                                           device=device,
                                           progress=True,
+                                          use_ddim=sampling_conf.use_ddim,
                                           eta=sampling_conf.ddim_eta,
                                           ref_image=img,
                                           mask=mask,
-                                          down_N_out=sampling_conf.down_N_out,
-                                          down_N_in=sampling_conf.down_N_in,
+                                          phi_out=phi_out,
+                                          phi_in=phi_in,
                                           T_out=sampling_conf.T_out,
                                           T_in=sampling_conf.T_in,
                                           blend_pix=sampling_conf.blend_pix,
@@ -370,6 +407,21 @@ def main():
                 grid_count += 1
 
             print(f"finished {exp_i + 1}/{np.prod([len(l) for l in sweep.values()])} experiments")
+
+    if sampling_conf.save_in:
+        # reload images and save them for reference
+        im_dir = os.path.join(outpath, "inputs", "images")
+        mask_dir = os.path.join(outpath, "inputs", "masks")
+        os.makedirs(im_dir, exist_ok=True)
+        os.makedirs(mask_dir, exist_ok=True)
+        data_loader = load_data(sampling_conf.init_img, sampling_conf.mask, sampling_conf.max_imgs,
+                                sampling_conf.batch_size, 0, sampling_conf.image_size, sampling_conf.shadow)
+        for img, mask, filename in tqdm(data_loader, desc="Data"):
+            for i, x_img in enumerate(img):
+                x_img = 255. * (x_img.permute(1, 2, 0).cpu().numpy() + 1.) / 2.
+                x_mask = 255. * mask[i].permute(1, 2, 0).cpu().numpy().repeat(3, axis=-1)
+                Image.fromarray(x_img.astype(np.uint8)).save(os.path.join(im_dir, f"{filename[i]}.png"))
+                Image.fromarray(x_mask.astype(np.uint8)).save(os.path.join(mask_dir, f"{filename[i]}.png"))
 
     dist.barrier()
     print(f"Your samples are ready and waiting for you here: \n{outpath} \n"
