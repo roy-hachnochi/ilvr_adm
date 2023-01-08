@@ -191,6 +191,11 @@ def create_argparser():
         help="Use RePaint (https://arxiv.org/pdf/2201.09865.pdf) for conditioning for (r*time_steps steps), (r in [0.0, 0.1])",
     )
     parser.add_argument(
+        "--ilvr_x0",
+        action='store_true',
+        help="perform ILVR in x_0 space instead of x_t space",
+    )
+    parser.add_argument(
         "--mask_dilate",
         type=int,
         nargs='*',
@@ -386,7 +391,8 @@ def main():
                                           T_in=sampling_conf.T_in,
                                           blend_pix=sampling_conf.blend_pix,
                                           t_start=t_enc,
-                                          repaint=repaint_conf)
+                                          repaint=repaint_conf,
+                                          ilvr_x0=sampling_conf.ilvr_x0)
 
                     samples = torch.clamp((samples + 1.0) / 2.0, min=0.0, max=1.0)
                     if not sampling_conf.skip_save:
@@ -419,9 +425,10 @@ def main():
         for img, mask, filename in tqdm(data_loader, desc="Data"):
             for i, x_img in enumerate(img):
                 x_img = 255. * (x_img.permute(1, 2, 0).cpu().numpy() + 1.) / 2.
-                x_mask = 255. * mask[i].permute(1, 2, 0).cpu().numpy().repeat(3, axis=-1)
                 Image.fromarray(x_img.astype(np.uint8)).save(os.path.join(im_dir, f"{filename[i]}.png"))
-                Image.fromarray(x_mask.astype(np.uint8)).save(os.path.join(mask_dir, f"{filename[i]}.png"))
+                if mask is not None:
+                    x_mask = 255. * mask[i].permute(1, 2, 0).cpu().numpy().repeat(3, axis=-1)
+                    Image.fromarray(x_mask.astype(np.uint8)).save(os.path.join(mask_dir, f"{filename[i]}.png"))
 
     dist.barrier()
     print(f"Your samples are ready and waiting for you here: \n{outpath} \n"

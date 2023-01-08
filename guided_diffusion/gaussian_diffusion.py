@@ -955,6 +955,7 @@ class GaussianDiffusion:
         blend_pix=None,
         t_start=None,
         repaint=None,
+        ilvr_x0=False,
         save_latents=None,
         save_refs=None,
     ):
@@ -1025,11 +1026,13 @@ class GaussianDiffusion:
                                     )
                     # ILVR
                     if (ind < T_out or ind < T_in) and ind != total_steps - 1:
-                        active_mask = 1 - blend(1 - (alpha_mask * (ind < time_stop_mask)).float())
-                        ref_sample = self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
-                        diff = ref_sample - out["sample"]
+                        active_mask = blend(alpha_mask * (ind < time_stop_mask).float())
+                        x = out["pred_xstart"] if ilvr_x0 else out["sample"]
+                        y = ref_image if ilvr_x0 else self.q_sample(ref_image, i_cur_t, th.randn(*shape, device=device))
+                        diff = y - x
                         blended = blend_mask * phi_out(diff) + (1 - blend_mask) * phi_in(diff)
-                        out["sample"] = out["sample"] + active_mask * blended
+                        x_new = x + active_mask * blended
+                        out["sample"] = self.q_sample(x_new, i_cur_t, th.randn(*shape, device=device)) if ilvr_x0 else x_new
 
                     img = out["sample"]
 
